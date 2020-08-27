@@ -70,7 +70,7 @@ public final class RAImageIngestModule implements DataSourceIngestModule {
 
         Extract registry = new ExtractRegistry();
         Extract recentDocuments = new RecentDocumentsByLnk();
-        Extract chrome = new Chrome();
+        Extract chrome = new Chromium();
         Extract firefox = new Firefox();
         Extract SEUQA = new SearchEngineURLQueryAnalyzer();
         Extract osExtract = new ExtractOs();
@@ -79,6 +79,7 @@ public final class RAImageIngestModule implements DataSourceIngestModule {
         Extract zoneInfo = new ExtractZoneIdentifier();
         Extract recycleBin = new ExtractRecycleBin();
         Extract sru = new ExtractSru();
+        Extract prefetch = new ExtractPrefetch();
 
         extractors.add(chrome);
         extractors.add(firefox);
@@ -93,6 +94,7 @@ public final class RAImageIngestModule implements DataSourceIngestModule {
         extractors.add(zoneInfo); // this needs to run after the web browser modules
         extractors.add(recycleBin); // this needs to run after ExtractRegistry and ExtractOS
         extractors.add(sru); 
+        extractors.add(prefetch);
         
         browserExtractors.add(chrome);
         browserExtractors.add(firefox);

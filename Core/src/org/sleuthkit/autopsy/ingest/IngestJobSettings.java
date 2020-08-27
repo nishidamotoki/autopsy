@@ -471,6 +471,12 @@ public final class IngestJobSettings {
                     case "Archive Extractor": //NON-NLS
                         moduleNames.add("Embedded File Extractor"); //NON-NLS
                         break;
+                    case "Correlation Engine": //NON-NLS
+                        moduleNames.add("Central Repository"); //NON-NLS
+                        break;
+                    case "Exif Parser": //NON-NLS
+                        moduleNames.add("Picture Analyzer"); //NON-NLS
+                        break;
                     default:
                         moduleNames.add(name);
                 }

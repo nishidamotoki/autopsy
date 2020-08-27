@@ -79,13 +79,19 @@ import org.sleuthkit.datamodel.AbstractFile;
 import org.sleuthkit.datamodel.Account;
 import org.sleuthkit.datamodel.BlackboardArtifact;
 import static org.sleuthkit.datamodel.BlackboardArtifact.ARTIFACT_TYPE.TSK_ASSOCIATED_OBJECT;
+import static org.sleuthkit.datamodel.BlackboardArtifact.ARTIFACT_TYPE.TSK_OS_ACCOUNT;
 import org.sleuthkit.datamodel.BlackboardAttribute;
 import static org.sleuthkit.datamodel.BlackboardAttribute.ATTRIBUTE_TYPE.TSK_ASSOCIATED_ARTIFACT;
 import static org.sleuthkit.datamodel.BlackboardAttribute.ATTRIBUTE_TYPE.TSK_COMMENT;
+import static org.sleuthkit.datamodel.BlackboardAttribute.ATTRIBUTE_TYPE.TSK_DATETIME;
 import static org.sleuthkit.datamodel.BlackboardAttribute.ATTRIBUTE_TYPE.TSK_DATETIME_ACCESSED;
 import static org.sleuthkit.datamodel.BlackboardAttribute.ATTRIBUTE_TYPE.TSK_DATETIME_CREATED;
 import static org.sleuthkit.datamodel.BlackboardAttribute.ATTRIBUTE_TYPE.TSK_DATETIME_MODIFIED;
+import static org.sleuthkit.datamodel.BlackboardAttribute.ATTRIBUTE_TYPE.TSK_DEVICE_ID;
+import static org.sleuthkit.datamodel.BlackboardAttribute.ATTRIBUTE_TYPE.TSK_NAME;
 import static org.sleuthkit.datamodel.BlackboardAttribute.ATTRIBUTE_TYPE.TSK_PATH;
+import static org.sleuthkit.datamodel.BlackboardAttribute.ATTRIBUTE_TYPE.TSK_USER_ID;
+import static org.sleuthkit.datamodel.BlackboardAttribute.ATTRIBUTE_TYPE.TSK_USER_NAME;
 import org.sleuthkit.datamodel.Content;
 import org.sleuthkit.datamodel.ReadContentInputStream.ReadContentInputStreamException;
 import org.sleuthkit.datamodel.Report;
@@ -112,7 +118,8 @@ import org.sleuthkit.datamodel.TskDataException;
     "Recently_Used_Artifacts_Winrar=Recently opened according to WinRAR MRU",
     "Recently_Used_Artifacts_Officedocs=Recently opened according to Office MRU",
     "Recently_Used_Artifacts_Adobe=Recently opened according to Adobe MRU",
-    "Recently_Used_Artifacts_Mediaplayer=Recently opened according to Media Player MRU"
+    "Recently_Used_Artifacts_Mediaplayer=Recently opened according to Media Player MRU",
+    "Registry_System_Bam=Recently Executed according to Background Activity Moderator (BAM)"
 })
 class ExtractRegistry extends Extract {
 
@@ -160,6 +167,7 @@ class ExtractRegistry extends Extract {
     private final Path rrFullHome; // Path to the full version of RegRipper
     private Content dataSource;
     private IngestJobContext context;
+    private Map<String, String> userNameMap;
     
     private static final String SHELLBAG_ARTIFACT_NAME = "RA_SHELL_BAG"; //NON-NLS
     private static final String SHELLBAG_ATTRIBUTE_LAST_WRITE = "RA_SHELL_BAG_LAST_WRITE"; //NON-NLS
@@ -229,6 +237,17 @@ class ExtractRegistry extends Extract {
         List<AbstractFile> allRegistryFiles = new ArrayList<>();
         org.sleuthkit.autopsy.casemodule.services.FileManager fileManager = currentCase.getServices().getFileManager();
 
+        // find the sam hives', process this first so we can map the user id's and sids for later use
+        try {
+            allRegistryFiles.addAll(fileManager.findFiles(dataSource, "sam", "/system32/config")); //NON-NLS
+        } catch (TskCoreException ex) {
+            String msg = NbBundle.getMessage(this.getClass(),
+                    "ExtractRegistry.findRegFiles.errMsg.errReadingFile", "sam");
+            logger.log(Level.WARNING, msg, ex);
+            this.addErrorMessage(this.getName() + ": " + msg);
+        }
+        
+        
         // find the user-specific ntuser-dat files
         try {
             allRegistryFiles.addAll(fileManager.findFiles(dataSource, "ntuser.dat")); //NON-NLS
@@ -244,7 +263,7 @@ class ExtractRegistry extends Extract {
         }
 
         // find the system hives'
-        String[] regFileNames = new String[]{"system", "software", "security", "sam"}; //NON-NLS
+        String[] regFileNames = new String[]{"system", "software", "security"}; //NON-NLS
         for (String regFileName : regFileNames) {
             try {
                 allRegistryFiles.addAll(fileManager.findFiles(dataSource, regFileName, "/system32/config")); //NON-NLS
@@ -337,6 +356,10 @@ class ExtractRegistry extends Extract {
                     } catch (IOException | TskCoreException ex) {
                         logger.log(Level.WARNING, String.format("Unable to get shell bags from file %s", regOutputFiles.fullPlugins), ex);
                     }
+                } else if (regFileNameLocal.toLowerCase().contains("system") && parseSystemPluginOutput(regOutputFiles.fullPlugins, regFile) == false) {
+                    this.addErrorMessage(
+                            NbBundle.getMessage(this.getClass(), "ExtractRegistry.analyzeRegFiles.failedParsingResults",
+                                    this.getName(), regFileName));
                 }
                 try {
                     Report report = currentCase.addReport(regOutputFiles.fullPlugins,
@@ -418,10 +441,31 @@ class ExtractRegistry extends Extract {
             String errFilePath = outFilePathBase + "-full.err.txt"; //NON-NLS
             logger.log(Level.INFO, "Writing Full RegRipper results to: {0}", regOutputFiles.fullPlugins); //NON-NLS
             executeRegRipper(rrFullCmd, rrFullHome, regFilePath, fullType, regOutputFiles.fullPlugins, errFilePath);
+            try {
+                scanErrorLogs(errFilePath);
+            } catch (IOException ex) {
+            logger.log(Level.SEVERE, "Unable to run RegRipper", ex); //NON-NLS
+            this.addErrorMessage(NbBundle.getMessage(this.getClass(), "ExtractRegistry.execRegRip.errMsg.failedAnalyzeRegFile", this.getName()));
+        } 
         }
         return regOutputFiles;
     }
 
+    private void scanErrorLogs(String errFilePath) throws IOException {
+        File regfile = new File(errFilePath);
+        try (BufferedReader reader = new BufferedReader(new FileReader(regfile))) {
+            String line = reader.readLine();
+            while (line != null) {
+                line = line.trim();
+                if (line.toLowerCase().contains("error") || line.toLowerCase().contains("@inc")) {
+                   logger.log(Level.WARNING, "Regripper file {0} contains errors from run", errFilePath); //NON-NLS
+                    
+                }
+                line = reader.readLine();
+            }
+        }
+    }
+    
     private void executeRegRipper(List<String> regRipperPath, Path regRipperHomeDir, String hiveFilePath, String hiveFileType, String outputFile, String errFile) {
         try {
             List<String> commandLine = new ArrayList<>();
@@ -909,6 +953,119 @@ class ExtractRegistry extends Extract {
         return false;
     }
 
+    
+    private boolean parseSystemPluginOutput(String regfilePath, AbstractFile regAbstractFile) {
+        File regfile = new File(regfilePath);
+        try (BufferedReader reader = new BufferedReader(new FileReader(regfile))) {
+            String line = reader.readLine();
+            while (line != null) {
+                line = line.trim();
+
+                if (line.toLowerCase().matches("^bam v.*")) {
+                    parseBamKey(regAbstractFile, reader, Bundle.Registry_System_Bam());
+                } else if (line.toLowerCase().matches("^bthport v..*")) {
+                    parseBlueToothDevices(regAbstractFile, reader);
+                }  
+                line = reader.readLine();
+            }
+            return true;
+        } catch (FileNotFoundException ex) {
+            logger.log(Level.WARNING, "Error finding the registry file.", ex); //NON-NLS
+        } catch (IOException ex) {
+            logger.log(Level.WARNING, "Error reading the system hive: {0}", ex); //NON-NLS
+        }
+        
+        return false;
+        
+    }
+    
+    /**
+     * Create recently used artifacts to parse the regripper plugin output, this 
+     * format is used in several diffent plugins
+     * 
+     * @param regFile registry file the artifact is associated with
+     * 
+     * @param reader buffered reader to parse adobemru records
+     * 
+     * @param comment string that will populate attribute TSK_COMMENT
+     * 
+     * @throws FileNotFound and IOException
+     */
+    private void parseBlueToothDevices(AbstractFile regFile, BufferedReader reader) throws FileNotFoundException, IOException {
+        List<BlackboardArtifact> bbartifacts = new ArrayList<>();
+        String line = reader.readLine();
+        while ((line != null) && (!line.contains(SECTION_DIVIDER))) {
+            line = reader.readLine();
+            
+            if (line != null) {
+                line = line.trim();
+            }
+            
+            if ((line != null) && (line.toLowerCase().contains("device unique id"))) {
+                // Columns are seperated by colons :
+                // Data : Values
+                // Record is 4 lines in length (Device Unique Id, Name, Last Seen,  LastConnected
+                while (line != null && !line.contains(SECTION_DIVIDER) && !line.isEmpty() && !line.toLowerCase().contains("radio support not found")) {
+                    Collection<BlackboardAttribute> attributes = new ArrayList<>();
+                    addBlueToothAttribute(line, attributes, TSK_DEVICE_ID);
+                    line = reader.readLine();
+                    // Name may not exist, check for it to make sure.
+                    if ((line != null) && (line.toLowerCase().contains("name"))) {
+                        addBlueToothAttribute(line, attributes, TSK_NAME);
+                        line = reader.readLine();
+                    }
+                    addBlueToothAttribute(line, attributes, TSK_DATETIME);
+                    line = reader.readLine();
+                    addBlueToothAttribute(line, attributes, TSK_DATETIME_ACCESSED);
+                    BlackboardArtifact bba = createArtifactWithAttributes(ARTIFACT_TYPE.TSK_BLUETOOTH_PAIRING, regFile, attributes);
+                    if(bba != null) {
+                         bbartifacts.add(bba);
+                    }
+                    // Read blank line between records then next read line is start of next block
+                    reader.readLine();
+                    line = reader.readLine();
+                }
+                
+                if (line != null) {
+                    line = line.trim();
+                }
+            }
+        }
+        if (!bbartifacts.isEmpty()) {
+            postArtifacts(bbartifacts);
+        }
+    }
+
+
+    private void addBlueToothAttribute(String line, Collection<BlackboardAttribute> attributes, ATTRIBUTE_TYPE attributeType) {
+	if (line == null) {
+		return;
+	}
+	
+	String tokens[] = line.split(": ");
+	if (tokens.length > 1 && !tokens[1].isEmpty()) {
+            String tokenString = tokens[1];
+            if (attributeType.getDisplayName().toLowerCase().contains("date")) {
+                String dateString = tokenString.toLowerCase().replace(" z", "");
+                // date format for plugin Tue Jun 23 10:27:54 2020 Z
+                SimpleDateFormat dateFormat = new SimpleDateFormat("EEE MMM d HH:mm:ss yyyy", US);
+                Long dateLong = Long.valueOf(0);
+                try {
+                    Date newDate = dateFormat.parse(dateString);
+                    dateLong = newDate.getTime()/1000;
+                } catch (ParseException ex) {
+                    // catching error and displaying date that could not be parsed
+                    // we set the timestamp to 0 and continue on processing
+                    logger.log(Level.WARNING, String.format("Failed to parse date/time %s for Bluetooth Last Seen attribute.", dateString), ex); //NON-NLS
+                }
+	        attributes.add(new BlackboardAttribute(attributeType, getName(), dateLong));                   
+            } else {
+		attributes.add(new BlackboardAttribute(attributeType, getName(), tokenString));
+            }
+	}
+}
+
+    
     /**
      * Parse the output of the SAM regripper plugin to get additional Account
      * information
@@ -968,6 +1125,16 @@ class ExtractRegistry extends Extract {
                 bbart.addAttributes(getAttributesForAccount(userInfo, groupMap.get(userInfo.get(SID_KEY)), false, regAbstractFile));
                 // index the artifact for keyword search
                 newArtifacts.add(bbart);
+            }
+            // Get a mapping of user sids to user names and save globally so it can be used for other areas
+            // of the registry, ie: BAM key
+            try {
+                userNameMap = makeUserNameMap(dataSource);
+            } catch (TskCoreException ex) {
+                logger.log(Level.WARNING, "Unable to create OS Account user name map", ex);
+                // This is not the end of the world we will just continue without 
+                // user names
+                userNameMap = new HashMap<>();
             }
             return true;
         } catch (FileNotFoundException ex) {
@@ -1227,6 +1394,67 @@ class ExtractRegistry extends Extract {
         }     
     }
     
+    /** 
+     * Create artifacts from BAM Regripper Plugin records
+     * 
+     * @param regFile registry file the artifact is associated with
+     * 
+     * @param reader buffered reader to parse adobemru records
+     * 
+     * @param comment string that will populate attribute TSK_COMMENT
+     * 
+     * @throws FileNotFound and IOException
+     */
+    private void parseBamKey(AbstractFile regFile, BufferedReader reader, String comment) throws FileNotFoundException, IOException {
+        List<BlackboardArtifact> bbartifacts = new ArrayList<>();
+        String line = reader.readLine();
+        // Read thru first bam output to get to second bam output which is the same but delimited
+        while (!line.contains(SECTION_DIVIDER)) {
+            line = reader.readLine();
+            line = line.trim();
+        }
+        line = reader.readLine();
+        line = line.trim();
+        while (!line.contains(SECTION_DIVIDER)) {
+            // Split the line into it parts based on delimiter of "|"
+            // 1570493613|BAM|||\Device\HarddiskVolume3\Program Files\TechSmith\Snagit 2018\Snagit32.exe (S-1-5-21-3042408413-2583535980-1301764466-1001)
+            String tokens[] = line.split("\\|");
+            Long progRunDateTime = Long.valueOf(tokens[0]); 
+            // Split on " (S-" as this signifies a User SID, if S- not used then may have issues becuase of (x86) in path is valid.
+            // We can add the S- back to the string that we split on since S- is a valid beginning of a User SID
+            String fileNameSid[] = tokens[4].split("\\s+\\(S-");
+            String userSid = "S-" + fileNameSid[1].substring(0, fileNameSid[1].length() - 1);
+            String userName = userNameMap.get(userSid);
+            if (userName == null) {
+                userName = userSid;
+            }
+            String fileName = fileNameSid[0];
+            if (fileName.startsWith("\\Device\\HarddiskVolume")) {
+                // Start at point past the 2nd slash
+                int fileNameStart = fileName.indexOf('\\', 16);
+                fileName = fileName.substring(fileNameStart, fileName.length());
+
+            }
+            Collection<BlackboardAttribute> attributes = new ArrayList<>();
+            attributes.add(new BlackboardAttribute(ATTRIBUTE_TYPE.TSK_PROG_NAME, getName(), fileName));
+            attributes.add(new BlackboardAttribute(ATTRIBUTE_TYPE.TSK_USER_NAME, getName(), userName));
+            attributes.add(new BlackboardAttribute(ATTRIBUTE_TYPE.TSK_DATETIME, getName(), progRunDateTime));
+            attributes.add(new BlackboardAttribute(ATTRIBUTE_TYPE.TSK_COMMENT, getName(), comment));
+            BlackboardArtifact bba = createArtifactWithAttributes(ARTIFACT_TYPE.TSK_PROG_RUN, regFile, attributes);
+            if (bba != null) {
+                bbartifacts.add(bba);
+                bba = createAssociatedArtifact(FilenameUtils.normalize(fileName, true), bba);
+                if (bba != null) {
+                    bbartifacts.add(bba);
+                }
+            }
+            line = reader.readLine();
+        }
+        if (!bbartifacts.isEmpty()) {
+            postArtifacts(bbartifacts);
+        }
+    }
+    
     /**
      * Create recently used artifacts from adobemru Regripper Plugin records
      * 
@@ -1367,7 +1595,8 @@ class ExtractRegistry extends Extract {
                 line = reader.readLine();
                 // Columns are
                 // FileX -> <file>
-                while (!line.contains(SECTION_DIVIDER) && !line.isEmpty() && !line.contains("Applets")) {
+                while (!line.contains(SECTION_DIVIDER) && !line.isEmpty() && !line.contains("Applets")
+                        && !line.contains(("Recent File List"))) {
                     // Split line on "> " which is the record delimiter between position and file
                     String tokens[] = line.split("> ");
                     String fileName = tokens[1];
@@ -1497,11 +1726,11 @@ class ExtractRegistry extends Extract {
         line = line.trim();
         // Reading to the SECTION DIVIDER to get next section of records to process.  Dates appear to have
         // multiple spaces in them that makes it harder to parse so next section will be easier to parse 
-        while (!line.contains(SECTION_DIVIDER) && !line.contains("MSOffice version not found.")) {
+        while (!line.contains(SECTION_DIVIDER)) {
             line = reader.readLine();
         }
         line = reader.readLine();
-        while (!line.contains(SECTION_DIVIDER) && !line.contains("MSOffice version not found.")) {
+        while (!line.contains(SECTION_DIVIDER)) {
             // record has the following format
             // 1294283922|REG|||OfficeDocs2010 - F:\Windows_time_Rules_xp.doc
             String tokens[] = line.split("\\|");
@@ -1629,6 +1858,49 @@ class ExtractRegistry extends Extract {
         return null;
     }
     
+    /**
+     * Create a map of userids to usernames from the OS Accounts.
+     *
+     * @param dataSource
+     *
+     * @return A Map of userIDs and userNames 
+     *
+     * @throws TskCoreException
+     */
+    private Map<String, String> makeUserNameMap(Content dataSource) throws TskCoreException {
+        Map<String, String> userNameMap = new HashMap<>();
+
+        List<BlackboardArtifact> accounts = blackboard.getArtifacts(TSK_OS_ACCOUNT.getTypeID(), dataSource.getId());
+
+        for (BlackboardArtifact account : accounts) {
+            BlackboardAttribute nameAttribute = getAttributeForArtifact(account, TSK_USER_NAME);
+            BlackboardAttribute idAttribute = getAttributeForArtifact(account, TSK_USER_ID);
+
+            String userName = nameAttribute != null ? nameAttribute.getDisplayString() : "";
+            String userID = idAttribute != null ? idAttribute.getDisplayString() : "";
+
+            if (!userID.isEmpty()) {
+                userNameMap.put(userID, userName);
+            }
+        }
+        
+        return userNameMap;
+    }
+    
+    /**
+     * Gets the attribute for the given type from the given artifact.
+     *
+     * @param artifact BlackboardArtifact to get the attribute from
+     * @param type     The BlackboardAttribute Type to get
+     *
+     * @return BlackboardAttribute for given artifact and type
+     *
+     * @throws TskCoreException
+     */
+    private BlackboardAttribute getAttributeForArtifact(BlackboardArtifact artifact, BlackboardAttribute.ATTRIBUTE_TYPE type) throws TskCoreException {
+        return artifact.getAttribute(new BlackboardAttribute.Type(BlackboardAttribute.ATTRIBUTE_TYPE.fromID(type.getTypeID())));
+    }
+
     /**
      * Create the shellbag artifacts from the list of ShellBag objects.
      *

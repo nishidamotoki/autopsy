@@ -59,8 +59,6 @@ import org.sleuthkit.datamodel.TskException;
 @Messages({
     "HashDbIngestModule.noKnownBadHashDbSetMsg=No notable hash set.",
     "HashDbIngestModule.knownBadFileSearchWillNotExecuteWarn=Notable file search will not be executed.",
-    "HashDbIngestModule.noChangeHashDbSetMsg=No 'No Change' hash set.",
-    "HashDbIngestModule.noChangeFileSearchWillNotExecuteWarn='No Change' file search will not be executed.",
     "HashDbIngestModule.noKnownHashDbSetMsg=No known hash set.",
     "HashDbIngestModule.knownFileSearchWillNotExecuteWarn=Known file search will not be executed.",
     "# {0} - fileName", "HashDbIngestModule.lookingUpKnownBadHashValueErr=Error encountered while looking up notable hash value for {0}.",
@@ -145,13 +143,6 @@ public class HashDbIngestModule implements FileIngestModule {
                         HashLookupModuleFactory.getModuleName(),
                         Bundle.HashDbIngestModule_noKnownBadHashDbSetMsg(),
                         Bundle.HashDbIngestModule_knownBadFileSearchWillNotExecuteWarn()));
-            }
-            
-            if (noChangeHashSets.isEmpty()) {
-                services.postMessage(IngestMessage.createWarningMessage(
-                        HashLookupModuleFactory.getModuleName(),
-                        Bundle.HashDbIngestModule_noChangeHashDbSetMsg(),
-                        Bundle.HashDbIngestModule_noChangeFileSearchWillNotExecuteWarn()));
             }
 
             if (knownHashSets.isEmpty()) {
@@ -590,6 +581,7 @@ public class HashDbIngestModule implements FileIngestModule {
      *
      * @param jobId            The ID of the job.
      * @param knownBadHashSets The list of hash sets for "known bad" files.
+     * @param noChangeHashSets The list of "no change" hash sets.
      * @param knownHashSets    The list of hash sets for "known" files.
      */
     @Messages("HashDbIngestModule.complete.noChangesFound=No Change items found:")
